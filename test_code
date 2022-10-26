@@ -1,0 +1,206 @@
+import 'package:flutter/material.dart';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
+
+import 'package:background_locator_2/background_locator.dart';
+import 'package:background_locator_2/location_dto.dart' as dto;
+import 'package:background_locator_2/settings/android_settings.dart' as android_settings;
+import 'package:background_locator_2/settings/ios_settings.dart' as locator_settings_ios_st;
+import 'package:background_locator_2/settings/locator_settings.dart' as locator_settings;
+
+import 'dart:isolate';
+import 'dart:math';
+import 'dart:async';
+import 'dart:ui';
+
+class BackgroundLocationTest extends StatefulWidget {
+  const BackgroundLocationTest({Key? key}) : super(key: key);
+
+  @override
+  __BackgroundLocationTestPageState createState() => __BackgroundLocationTestPageState();
+}
+
+class __BackgroundLocationTestPageState extends State<BackgroundLocationTest> {
+  static const String _isolateName = "LocatorIsolate";
+  ReceivePort port = ReceivePort();
+
+  static User? userInfo = FirebaseAuth.instance.currentUser;
+
+
+  @override
+  void initState() {
+    super.initState();
+
+    IsolateNameServer.registerPortWithName(port.sendPort, _isolateName);
+    port.listen((dynamic data) {});
+    initPlatformState();
+  }
+
+  static saveCoordinates(latitude, longitude) async {
+    await Firebase.initializeApp();
+    var dataToSave =  {
+      'uid': userInfo!.uid,
+      'latitude': latitude,
+      'longitude': longitude,
+      'time': DateTime.now().millisecondsSinceEpoch,
+      'dateTime': {
+        'day' : DateTime.now().day,'month' : DateTime.now().month,'year' : DateTime.now().year,
+        'minute' : DateTime.now().minute, 'hour' : DateTime.now().hour},
+    };
+      FirebaseFirestore.instance.collection('locations').doc().set(dataToSave, SetOptions(merge: true)).catchError((er) {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    //var lL = context.watch<UpdateLocation>().currentLocation;
+    return WillPopScope(
+      onWillPop: () async => false,
+      child: const Scaffold(
+        body: Center(child: Text('Background location tester...')),
+      ),
+    );
+  }
+
+  Future<void> initPlatformState() async {
+    await BackgroundLocator.initialize();
+    startBgLocation();
+  }
+
+  static void callback(dto.LocationDto locationDto) async {
+    final SendPort? send = IsolateNameServer.lookupPortByName(_isolateName);
+    send!.send(locationDto);
+    var res = locationDto.toJson();
+    fetch(res);
+  }
+
+  static fetch(Map<String, dynamic> res) async{
+    await Firebase.initializeApp();
+    saveCoordinates(res['latitude'], res['longitude']);
+    debugPrint('::::::::::::::::::::::::::::$res');
+  }
+
+  startBgLocation(){
+    Future.delayed(const Duration(seconds: 3), (){
+      startLocationService();
+    });
+  }
+
+  void startLocationService(){
+    Map<String, dynamic> data = {'countInit': 1};
+    BackgroundLocator.registerLocationUpdate(callback,
+        initCallback: LocationCallbackHandler.initCallback,
+        initDataCallback: data,
+        disposeCallback: LocationCallbackHandler.disposeCallback,
+        autoStop: false,
+        iosSettings: const locator_settings_ios_st.IOSSettings(accuracy: locator_settings.LocationAccuracy.NAVIGATION, distanceFilter: 0),
+        androidSettings: const android_settings.AndroidSettings(accuracy: locator_settings.LocationAccuracy.NAVIGATION, interval: 5, distanceFilter: 0,
+            androidNotificationSettings: android_settings.AndroidNotificationSettings(
+                notificationChannelName: 'Background location',
+                notificationTitle: 'Back Locator',
+                notificationMsg: 'running',
+                notificationBigMsg: 'Back location is running...',
+                notificationIcon: '',
+                notificationIconColor: Colors.grey,
+                notificationTapCallback: LocationCallbackHandler.notificationCallback)));
+  }
+}
+
+
+class LocationCallbackHandler {
+  static Future<void> initCallback(Map<dynamic, dynamic> params) async {
+    LocationServiceRepository myLocationCallbackRepository =
+    LocationServiceRepository();
+    await myLocationCallbackRepository.init(params);
+  }
+
+  static Future<void> disposeCallback() async {
+    LocationServiceRepository myLocationCallbackRepository =
+    LocationServiceRepository();
+    await myLocationCallbackRepository.dispose();
+  }
+
+  static Future<void> callback(dto.LocationDto locationDto) async {
+    LocationServiceRepository myLocationCallbackRepository =
+    LocationServiceRepository();
+    await myLocationCallbackRepository.callback(locationDto);
+  }
+
+  static Future<void> notificationCallback() async {
+  }
+}
+
+class LocationServiceRepository {
+  static final LocationServiceRepository _instance = LocationServiceRepository._();
+
+  LocationServiceRepository._();
+
+  factory LocationServiceRepository() {
+    return _instance;
+  }
+
+  static const String isolateName = 'LocatorIsolate';
+
+  int _count = -1;
+
+  Future<void> init(Map<dynamic, dynamic> params) async {
+    //TODO change log
+    if (params.containsKey('countInit')) {
+      dynamic tmpCount = params['countInit'];
+      if (tmpCount is double) {
+        _count = tmpCount.toInt();
+      } else if (tmpCount is String) {
+        _count = int.parse(tmpCount);
+      } else if (tmpCount is int) {
+        _count = tmpCount;
+      } else {
+        _count = -2;
+      }
+    } else {
+      _count = 0;
+    }
+    await setLogLabel("start");
+    final SendPort? send = IsolateNameServer.lookupPortByName(isolateName);
+    send!.send(null);
+  }
+
+  Future<void> dispose() async {
+    await setLogLabel("end");
+    final SendPort? send = IsolateNameServer.lookupPortByName(isolateName);
+    send!.send(null);
+  }
+
+  Future<void> callback(dto.LocationDto locationDto) async {
+    await setLogPosition(_count, locationDto);
+    final SendPort? send = IsolateNameServer.lookupPortByName(isolateName);
+    send!.send(locationDto);
+    _count++;
+
+  }
+
+  static Future<void> setLogLabel(String label) async {
+  }
+
+  static Future<void> setLogPosition(int count, dto.LocationDto data) async {
+  }
+
+  static double dp(double val, int places) {
+    double mod = pow(10.0, places).toDouble();
+    return ((val * mod).round().toDouble() / mod);
+  }
+
+  static String formatDateLog(DateTime date) {
+    return date.hour.toString() +
+        ":" +
+        date.minute.toString() +
+        ":" +
+        date.second.toString();
+  }
+
+  static String formatLog(dto.LocationDto locationDto) {
+    return dp(locationDto.latitude, 4).toString() +
+        " " +
+        dp(locationDto.longitude, 4).toString();
+  }
+}
